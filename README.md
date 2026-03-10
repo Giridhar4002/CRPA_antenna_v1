@@ -1,1 +1,11 @@
-# CRPA_antenna_v1
+---
+title: CRPA_antenna
+colorFrom: purple
+colorTo: blue
+sdk: streamlit
+sdk_version: 1.55.0
+app_file: app.py
+pinned: false
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
