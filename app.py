@@ -30,6 +30,58 @@ st.markdown("""
 st.title("📡 CRPA Antenna — Null Steering Dashboard")
 st.caption("Controlled Reception Pattern Antenna · Square Patch Elements · Circular Array · Projection-Matrix Null Steering")
 
+# ──────────────────────────────────────────────────────
+# PROJECT OVERVIEW & INSTRUCTIONS
+# ──────────────────────────────────────────────────────
+with st.expander("ℹ️  About This Project & How to Use", expanded=False):
+    st.markdown("""
+### Project Overview
+
+This interactive dashboard simulates a **Controlled Reception Pattern Antenna (CRPA)** — a class of
+adaptive antenna arrays widely used in **GPS/GNSS receivers** to maintain satellite lock in the
+presence of intentional jamming or unintentional interference. The array consists of **square
+microstrip patch elements** arranged in a **circular configuration** with an additional centre element,
+forming an N+1 element topology.
+
+The core algorithm employs **projection-matrix null steering**, where the weight vector is computed as
+**w = P · a_d** with **P = I − Aₙ(AₙᴴAₙ)⁻¹Aₙᴴ**. This projects the desired-direction steering
+vector onto the subspace orthogonal to the interference directions, placing deep radiation-pattern
+nulls toward each specified jammer while preserving gain toward the desired signal.
+
+---
+
+### How to Use
+
+1. **Configure the Array** — Use the sidebar to set the operating frequency, number of ring
+   elements, and element spacing (as a fraction of wavelength). A centre element is always included
+   automatically.
+
+2. **Set the Desired Signal Direction** — Adjust the *Desired Azimuth* and *Desired Elevation*
+   sliders to point the main beam toward the signal of interest (e.g., a GNSS satellite).
+
+3. **Add Interference Nulls** — Select the number of nulls (up to 4) and specify each jammer's
+   azimuth and elevation. The algorithm will steer pattern nulls toward those directions.
+
+4. **Analyse the Results** — Inspect the polar and Cartesian azimuth patterns, the elevation cut,
+   the element layout with weight magnitudes/phases, and the phasor diagram. Check the *Null
+   Summary* table for depth and status of each null.
+
+5. **Optional 3D View** — Enable *Show 3D Pattern* at the bottom of the sidebar for a full
+   upper-hemisphere radiation pattern (takes a moment to render).
+
+---
+
+### Key Assumptions & Limitations
+
+- Element pattern is modelled as **cos¹·⁵(θ)**, typical of a square microstrip patch.
+- Mutual coupling between elements is **not** included; results are most accurate for spacings
+  ≥ 0.4 λ.
+- The null-steering algorithm requires **fewer nulls than total elements** (N_nulls < N_total) to
+  remain well-conditioned.
+- All patterns are shown relative to the array-factor peak; absolute gain is estimated using a
+  simplified directivity model.
+""")
+
 C = 299_792_458.0
 DARK_BG  = "#0f1117"
 PANEL_BG = "#1a1d2e"
