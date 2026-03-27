@@ -1,89 +1,136 @@
 """
 =============================================================
-  CRPA ANTENNA — Null Steering Dashboard  (optimised)
-  Controlled Reception Pattern Antenna
-  Square Patch Elements · Circular Array · Adaptive Nulling
+  CRPA ANTENNA — Advanced Null Steering Dashboard
+  Controlled Reception Pattern Antenna (N+1 Circular Array)
+  Projection / LCMV-style constrained beamforming + diagnostics
 =============================================================
 """
+
 import math
+import json
+from dataclasses import dataclass, asdict
+from typing import List, Tuple, Dict
+
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import pandas as pd
 import streamlit as st
 
-# ──────────────────────────────────────────────────────
-# PAGE STYLE
-# ──────────────────────────────────────────────────────
-st.set_page_config(page_title="CRPA Null Steering", page_icon="📡", layout="wide")
-st.markdown("""
+# -----------------------------------------------------------------------------
+# APP CONFIG + THEME
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="CRPA Null Steering • Advanced", page_icon="📡", layout="wide")
+
+st.markdown(
+    """
 <style>
-  .block-container { padding-top: 1rem; }
-  .metric-box { background:#1a1d2e; border-radius:8px; padding:10px 14px; text-align:center; margin-bottom:6px; }
-  .metric-val { font-size:1.25rem; font-weight:700; color:#00d4ff; }
-  .metric-lbl { font-size:0.72rem; color:#aaa; margin-top:2px; }
+  .block-container { padding-top: 0.9rem; }
+  .metric-box {
+    background:#1a1d2e;
+    border-radius:10px;
+    padding:10px 12px;
+    text-align:center;
+    margin-bottom:6px;
+    border:1px solid #2a3150;
+  }
+  .metric-val { font-size:1.2rem; font-weight:700; color:#00d4ff; }
+  .metric-lbl { font-size:0.72rem; color:#adb5bd; margin-top:2px; }
+  .small-note { font-size:0.82rem; color:#adb5bd; }
 </style>
-""", unsafe_allow_html=True)
-
-st.title("📡 CRPA Antenna — Null Steering Dashboard")
-st.caption("Controlled Reception Pattern Antenna · Square Patch Elements · Circular Array · Projection-Matrix Null Steering")
-
-# ──────────────────────────────────────────────────────
-# PROJECT OVERVIEW & INSTRUCTIONS
-# ──────────────────────────────────────────────────────
-st.markdown("---")
-
-st.subheader("📖 Project Overview")
-st.markdown(
-    "This interactive dashboard simulates a **Controlled Reception Pattern Antenna (CRPA)** — "
-    "a class of adaptive antenna arrays widely used in **GPS / GNSS receivers** to maintain "
-    "satellite lock in the presence of intentional jamming or unintentional interference. "
-    "The array consists of **square microstrip patch elements** arranged in a **circular "
-    "configuration** with an additional centre element, forming an **N + 1** element topology."
-)
-st.markdown(
-    "The core algorithm employs **projection-matrix null steering**, where the weight vector "
-    "is computed as `w = P · a_d` with `P = I − Aₙ(AₙᴴAₙ)⁻¹Aₙᴴ`. This projects the "
-    "desired-direction steering vector onto the subspace orthogonal to the interference "
-    "directions, placing deep radiation-pattern nulls toward each specified jammer while "
-    "preserving gain toward the desired signal."
+""",
+    unsafe_allow_html=True,
 )
 
-st.subheader("🧭 How to Use")
-st.markdown(
-    "**① Array Setup** — Use the **sidebar** to set the operating frequency, number of ring "
-    "elements, and element spacing (× λ). A centre element is always included.\n\n"
-    "**② Desired Signal** — Adjust **Desired Azimuth** and **Desired Elevation** sliders to "
-    "steer the main beam toward the signal of interest (e.g., a GNSS satellite).\n\n"
-    "**③ Add Nulls** — Select up to **4 nulls** and specify each jammer's azimuth & elevation. "
-    "The algorithm will steer pattern nulls toward those directions.\n\n"
-    "**④ Analyse** — Inspect polar & Cartesian azimuth patterns, elevation cut, element layout "
-    "with weight magnitudes/phases, phasor diagram, and the Null Summary table.\n\n"
-    "**⑤ 3D View** — Enable **Show 3D Pattern** in the sidebar for a full upper-hemisphere "
-    "radiation pattern (takes a moment to render)."
+st.title("📡 CRPA Antenna — Advanced Null Steering Dashboard")
+st.caption(
+    "Controlled Reception Pattern Antenna · Circular N+1 array · "
+    "Projection-matrix null steering with stability diagnostics"
 )
 
-st.subheader("⚠️ Assumptions & Limitations")
-st.markdown(
-    "• Element pattern modelled as **cos¹·⁵(θ)**, typical of a square microstrip patch.  \n"
-    "• Mutual coupling is **not** included; most accurate for spacings ≥ 0.4 λ.  \n"
-    "• Requires **fewer nulls than total elements** (N_nulls < N_total).  \n"
-    "• All patterns shown relative to array-factor peak; absolute gain uses a simplified directivity model."
-)
-
-st.markdown("---")
-
+# -----------------------------------------------------------------------------
+# CONSTANTS
+# -----------------------------------------------------------------------------
 C = 299_792_458.0
-DARK_BG  = "#0f1117"
+DARK_BG = "#0f1117"
 PANEL_BG = "#1a1d2e"
 GRID_COL = "#2e3150"
 NULL_COLS = ["#e74c3c", "#e67e22", "#9b59b6", "#1abc9c"]
-DES_COL  = "#2ecc71"
-PAT_COL  = "#00d4ff"
+DES_COL = "#2ecc71"
+PAT_COL = "#00d4ff"
 
 
+# -----------------------------------------------------------------------------
+# DATA MODELS
+# -----------------------------------------------------------------------------
+@dataclass
+class Scenario:
+    name: str
+    freq_mhz: float
+    n_outer: int
+    spacing_frac: float
+    steer_az: float
+    steer_el: float
+    patch_eff_pct: int
+    dyn_range_db: int
+    nulls: List[Tuple[float, float]]
+    quality_mode: str
+    show_3d: bool
+
+SCENARIOS: Dict[str, Scenario] = {
+    "Custom": Scenario(
+        name="Custom",
+        freq_mhz=1575.42,
+        n_outer=7,
+        spacing_frac=0.50,
+        steer_az=0.0,
+        steer_el=90.0,
+        patch_eff_pct=80,
+        dyn_range_db=40,
+        nulls=[(-60, 30), (120, 60)],
+        quality_mode="Normal",
+        show_3d=False,
+    ),
+    "GPS L1 (2 jammer)": Scenario(
+        name="GPS L1 (2 jammer)",
+        freq_mhz=1575.42,
+        n_outer=7,
+        spacing_frac=0.50,
+        steer_az=15.0,
+        steer_el=70.0,
+        patch_eff_pct=82,
+        dyn_range_db=45,
+        nulls=[(-55, 25), (130, 50)],
+        quality_mode="Normal",
+        show_3d=False,
+    ),
+    "Stress test (4 jammer)": Scenario(
+        name="Stress test (4 jammer)",
+        freq_mhz=1575.42,
+        n_outer=8,
+        spacing_frac=0.45,
+        steer_az=0.0,
+        steer_el=75.0,
+        patch_eff_pct=80,
+        dyn_range_db=50,
+        nulls=[(-70, 25), (40, 35), (130, 45), (-145, 60)],
+        quality_mode="Fast",
+        show_3d=False,
+    ),
+}
+
+QUALITY_GRIDS = {
+    "Fast": {"az_pts": 361, "el_pts": 181, "n_az_3d": 61, "n_el_3d": 31},
+    "Normal": {"az_pts": 721, "el_pts": 361, "n_az_3d": 91, "n_el_3d": 46},
+    "High": {"az_pts": 1441, "el_pts": 721, "n_az_3d": 121, "n_el_3d": 61},
+}
+
+
+# -----------------------------------------------------------------------------
+# PLOT STYLE HELPERS
+# -----------------------------------------------------------------------------
 def _ax_dark(ax):
     ax.set_facecolor(PANEL_BG)
     ax.tick_params(colors="white", labelsize=8)
@@ -91,460 +138,612 @@ def _ax_dark(ax):
         sp.set_edgecolor("#444")
     ax.grid(color=GRID_COL, linestyle="--", alpha=0.5)
 
-
 def _fig_dark(fig):
     fig.patch.set_facecolor(DARK_BG)
 
 
-# ──────────────────────────────────────────────────────
-# SIDEBAR — collect all inputs before any computation
-# ──────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("🔧 Array Parameters")
-    freq_mhz     = st.number_input("Frequency (MHz)", 100.0, 6000.0, 1575.42, 0.5)
-    N_elem       = st.number_input("Outer Elements (N)", 2, 16, 7, 1,
-                                   help="Ring elements — a centre element is always added")
-    spacing_frac = st.slider("Element Spacing (× λ)", 0.30, 1.00, 0.50, 0.01)
-    steer_az     = st.slider("Desired Azimuth (°)",   -180, 180, 0,  1)
-    steer_el     = st.slider("Desired Elevation (°)",    0,  90, 90, 1)
-    patch_eff    = st.slider("Patch Efficiency (%)",    50, 100, 80, 1)
-    dyn_range    = st.slider("Pattern Dynamic Range (dB)", 20, 60, 40, 5)
-
-    st.markdown("---")
-    st.header("🎯 Null Steering")
-    n_nulls = st.selectbox("Number of Nulls", [0, 1, 2, 3, 4], index=2)
-
-    null_dirs = []
-    _def_az = [-60, 120, -130, 45]
-    _def_el = [30,   60,   45,  20]
-    for i in range(n_nulls):
-        st.markdown(f"**Null {i+1}**")
-        c1, c2 = st.columns(2)
-        with c1:
-            naz = st.slider(f"Az {i+1} (°)", -180, 180, _def_az[i], 1, key=f"naz{i}")
-        with c2:
-            nel = st.slider(f"El {i+1} (°)",   0,  90, _def_el[i], 1, key=f"nel{i}")
-        null_dirs.append((naz, nel))
-
-    st.markdown("---")
-    show_3d = st.checkbox("Show 3D Pattern (slower)", value=False)
-
-
-# ──────────────────────────────────────────────────────
-# PURE CACHED PHYSICS  (re-runs only when inputs change)
-# ──────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# NUMERICS (PURE FUNCTIONS)
+# -----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def build_array(N_elem, spacing_frac, freq_mhz):
-    wl     = C / (freq_mhz * 1e6)
+def build_array(n_outer: int, spacing_frac: float, freq_mhz: float):
+    wl = C / (freq_mhz * 1e6)
     radius = spacing_frac * wl
-    ang    = 2 * np.pi * np.arange(N_elem) / N_elem
-    ring   = np.zeros((N_elem, 3))
+    ang = 2 * np.pi * np.arange(n_outer) / n_outer
+    ring = np.zeros((n_outer, 3))
     ring[:, 0] = radius * np.cos(ang)
     ring[:, 1] = radius * np.sin(ang)
     pos = np.vstack([np.zeros((1, 3)), ring])
     return tuple(map(tuple, pos)), wl, radius
 
-
 @st.cache_data(show_spinner=False)
-def _sv(pos_t, az_deg, el_deg, wl):
+def steering_vec(pos_t, az_deg: float, el_deg: float, wl: float):
     pos = np.array(pos_t)
     az, el = np.radians(az_deg), np.radians(el_deg)
-    k = np.array([np.cos(el)*np.sin(az), np.cos(el)*np.cos(az), np.sin(el)])
-    return np.exp(1j * 2*np.pi/wl * pos @ k)
-
+    k = np.array([np.cos(el) * np.sin(az), np.cos(el) * np.cos(az), np.sin(el)])
+    return np.exp(1j * 2 * np.pi / wl * (pos @ k))
 
 @st.cache_data(show_spinner=False)
-def compute_weights(pos_t, wl, s_az, s_el, null_t):
-    N   = len(pos_t)
-    a_d = _sv(pos_t, s_az, s_el, wl)
-    if not null_t:
-        return tuple(a_d.real), tuple(a_d.imag)
-    A_n = np.column_stack([_sv(pos_t, az, el, wl) for az, el in null_t])
+def compute_weights_projection(
+    pos_t,
+    wl: float,
+    steer_az: float,
+    steer_el: float,
+    null_t,
+    loading_eps: float,
+):
+    """Projection-matrix nulling with adaptive diagonal loading diagnostics."""
+    n = len(pos_t)
+    a_d = steering_vec(pos_t, steer_az, steer_el, wl)
+
+    if len(null_t) == 0:
+        w = a_d / max(np.linalg.norm(a_d), 1e-12)
+        return tuple(w.real), tuple(w.imag), 1.0, 0.0, 0.0
+
+    A_n = np.column_stack([steering_vec(pos_t, az, el, wl) for az, el in null_t])
     AHA = A_n.conj().T @ A_n
+    cond_num = float(np.linalg.cond(AHA)) if AHA.size else 1.0
+
+    # Adaptive loading when ill-conditioned
+    adaptive_eps = loading_eps
+    if cond_num > 1e8:
+        adaptive_eps = max(loading_eps, 1e-3)
+    elif cond_num > 1e6:
+        adaptive_eps = max(loading_eps, 1e-4)
+
     try:
-        P = np.eye(N) - A_n @ np.linalg.solve(AHA + 1e-6*np.eye(len(null_t)), A_n.conj().T)
+        inv_term = np.linalg.solve(AHA + adaptive_eps * np.eye(AHA.shape[0]), A_n.conj().T)
+        P = np.eye(n) - A_n @ inv_term
     except np.linalg.LinAlgError:
-        P = np.eye(N)
+        P = np.eye(n)
+
     w = P @ a_d
     nm = np.linalg.norm(w)
-    w  = w / nm if nm > 1e-10 else a_d / N
-    return tuple(w.real), tuple(w.imag)
+    if nm < 1e-12:
+        w = a_d / max(np.linalg.norm(a_d), 1e-12)
+    else:
+        w = w / nm
 
+    # Constraint residual: ||A^H w||_2
+    residual = float(np.linalg.norm(A_n.conj().T @ w)) if len(null_t) else 0.0
+
+    return tuple(w.real), tuple(w.imag), cond_num, adaptive_eps, residual
 
 @st.cache_data(show_spinner=False)
-def compute_az_pattern(pos_t, wr, wi, wl, eff, n_pts=721):
-    w   = np.array(wr) + 1j*np.array(wi)
+def compute_az_pattern(pos_t, wr, wi, wl: float, eff: float, n_pts: int):
+    w = np.array(wr) + 1j * np.array(wi)
     azs = np.linspace(-180, 180, n_pts)
     out = np.zeros(n_pts)
     for i, az in enumerate(azs):
-        a     = _sv(pos_t, az, 90, wl)
-        out[i] = (np.abs(np.dot(w.conj(), a)) * np.sqrt(eff))**2
+        a = steering_vec(pos_t, az, 90.0, wl)
+        out[i] = (np.abs(np.dot(w.conj(), a)) * np.sqrt(eff)) ** 2
     return tuple(azs), tuple(out)
 
-
 @st.cache_data(show_spinner=False)
-def compute_el_pattern(pos_t, wr, wi, wl, az_deg, eff, n_pts=361):
-    w   = np.array(wr) + 1j*np.array(wi)
+def compute_el_pattern(pos_t, wr, wi, wl: float, az_deg: float, eff: float, n_pts: int):
+    w = np.array(wr) + 1j * np.array(wi)
     els = np.linspace(0, 90, n_pts)
     out = np.zeros(n_pts)
     for i, el in enumerate(els):
-        a        = _sv(pos_t, az_deg, el, wl)
-        el_r     = np.radians(90 - el)
-        elem_pat = max(np.cos(el_r), 0)**1.5
-        out[i]   = (np.abs(np.dot(w.conj(), a)) * elem_pat * np.sqrt(eff))**2
+        a = steering_vec(pos_t, az_deg, el, wl)
+        el_r = np.radians(90 - el)
+        elem_pat = max(np.cos(el_r), 0.0) ** 1.5
+        out[i] = (np.abs(np.dot(w.conj(), a)) * elem_pat * np.sqrt(eff)) ** 2
     return tuple(els), tuple(out)
 
-
 @st.cache_data(show_spinner=False)
-def compute_3d_pattern(pos_t, wr, wi, wl, eff, n_az=91, n_el=46):
-    w    = np.array(wr) + 1j*np.array(wi)
+def compute_3d_pattern(pos_t, wr, wi, wl: float, eff: float, n_az: int, n_el: int):
+    w = np.array(wr) + 1j * np.array(wi)
     az_v = np.linspace(-180, 180, n_az)
     el_v = np.linspace(0, 90, n_el)
-    POW  = np.zeros((n_el, n_az))
-    for ei, el in enumerate(el_v):
-        el_r     = np.radians(90 - el)
-        elem_pat = max(np.cos(el_r), 0)**1.5
-        for ai, az in enumerate(az_v):
-            a          = _sv(pos_t, az, el, wl)
-            POW[ei,ai] = (np.abs(np.dot(w.conj(), a)) * elem_pat * np.sqrt(eff))**2
-    return tuple(az_v), tuple(el_v), tuple(map(tuple, POW))
+    pwr = np.zeros((n_el, n_az))
 
+    for ei, el in enumerate(el_v):
+        el_r = np.radians(90 - el)
+        elem_pat = max(np.cos(el_r), 0.0) ** 1.5
+        for ai, az in enumerate(az_v):
+            a = steering_vec(pos_t, az, el, wl)
+            pwr[ei, ai] = (np.abs(np.dot(w.conj(), a)) * elem_pat * np.sqrt(eff)) ** 2
+
+    return tuple(az_v), tuple(el_v), tuple(map(tuple, pwr))
 
 def to_db(arr, ref, floor_db):
-    return 10*np.log10(np.maximum(np.array(arr)/max(ref, 1e-30), 10**(floor_db/10)))
+    arr_np = np.array(arr)
+    return 10 * np.log10(np.maximum(arr_np / max(ref, 1e-30), 10 ** (floor_db / 10)))
 
+def beamwidth_3db(az_deg, db_vals):
+    az = np.array(az_deg)
+    db = np.array(db_vals)
+    imax = int(np.argmax(db))
+    thr = db[imax] - 3.0
 
-# ──────────────────────────────────────────────────────
-# CACHED FIGURE BUILDERS  (re-render only when data changes)
-# ──────────────────────────────────────────────────────
+    left = imax
+    while left > 0 and db[left] >= thr:
+        left -= 1
+    right = imax
+    while right < len(db) - 1 and db[right] >= thr:
+        right += 1
+
+    return float(abs(az[right] - az[left])) if right > left else 0.0
+
+def sidelobe_level(db_vals):
+    db = np.array(db_vals)
+    i0 = int(np.argmax(db))
+    guard = max(3, len(db) // 60)
+    mask = np.ones_like(db, dtype=bool)
+    mask[max(i0 - guard, 0):min(i0 + guard + 1, len(db))] = False
+    if np.any(mask):
+        return float(np.max(db[mask]))
+    return float(np.max(db))
+
+# -----------------------------------------------------------------------------
+# SIDEBAR CONTROLS
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("⚙️ Scenario")
+    preset_name = st.selectbox("Preset", list(SCENARIOS.keys()), index=0)
+    preset = SCENARIOS[preset_name]
+
+    st.markdown("---")
+    st.header("🔧 Array Parameters")
+    freq_mhz = st.number_input("Frequency (MHz)", 100.0, 6000.0, float(preset.freq_mhz), 0.5)
+    n_outer = st.number_input("Outer Elements (N)", 2, 16, int(preset.n_outer), 1)
+    spacing_frac = st.slider("Element Spacing (× λ)", 0.30, 1.00, float(preset.spacing_frac), 0.01)
+    steer_az = st.slider("Desired Azimuth (°)", -180, 180, int(preset.steer_az), 1)
+    steer_el = st.slider("Desired Elevation (°)", 0, 90, int(preset.steer_el), 1)
+    patch_eff = st.slider("Patch Efficiency (%)", 50, 100, int(preset.patch_eff_pct), 1)
+    dyn_range = st.slider("Pattern Dynamic Range (dB)", 20, 70, int(preset.dyn_range_db), 5)
+
+    st.markdown("---")
+    st.header("🎯 Null Steering")
+    n_nulls = st.selectbox("Number of Nulls", [0, 1, 2, 3, 4], index=min(len(preset.nulls), 4))
+
+    default_nulls = preset.nulls + [(-120, 35), (60, 30), (145, 50), (-40, 20)]
+    null_dirs = []
+    for i in range(n_nulls):
+        st.markdown(f"**Null {i + 1}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            naz = st.slider(f"Az {i + 1} (°)", -180, 180, int(default_nulls[i][0]), 1, key=f"naz{i}")
+        with c2:
+            nel = st.slider(f"El {i + 1} (°)", 0, 90, int(default_nulls[i][1]), 1, key=f"nel{i}")
+        null_dirs.append((float(naz), float(nel)))
+
+    st.markdown("---")
+    st.header("🧮 Solver & Rendering")
+    quality_mode = st.selectbox("Quality Mode", ["Fast", "Normal", "High"], index=["Fast", "Normal", "High"].index(preset.quality_mode))
+    loading_eps = st.number_input("Diagonal Loading ε", 1e-8, 1e-1, 1e-6, format="%.1e")
+    show_3d = st.checkbox("Show 3D Pattern (slower)", value=bool(preset.show_3d))
+
+# -----------------------------------------------------------------------------
+# HEADER INFO
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.subheader("📖 Project Overview")
+st.markdown(
+    "This dashboard models a **Controlled Reception Pattern Antenna (CRPA)** used for GNSS anti-jamming. "
+    "It computes complex element weights via projection-matrix null steering and visualizes array response, "
+    "null depth, stability metrics, and beam quality."
+)
+
+# -----------------------------------------------------------------------------
+# COMPUTE PIPELINE
+# -----------------------------------------------------------------------------
+null_t = tuple(null_dirs)
+pos_t, wl, radius = build_array(int(n_outer), float(spacing_frac), float(freq_mhz))
+n_total = len(pos_t)
+
+if len(null_t) >= n_total:
+    st.error(
+        f"Invalid configuration: null count ({len(null_t)}) must be less than total elements ({n_total})."
+    )
+    st.stop()
+
+if float(spacing_frac) < 0.40:
+    st.warning("Spacing < 0.40 λ can increase coupling effects; model may be optimistic.")
+
+eff = patch_eff / 100.0
+grids = QUALITY_GRIDS[quality_mode]
+
+wr_t, wi_t, cond_num, eps_used, residual = compute_weights_projection(
+    pos_t, wl, float(steer_az), float(steer_el), null_t, float(loading_eps)
+)
+
+w = np.array(wr_t) + 1j * np.array(wi_t)
+wm = np.abs(w)
+wp = np.angle(w, deg=True)
+max_w = float(max(np.max(wm), 1e-30))
+
+az_t, p_az_t = compute_az_pattern(pos_t, wr_t, wi_t, wl, eff, grids["az_pts"])
+el_t, p_el_t = compute_el_pattern(pos_t, wr_t, wi_t, wl, float(steer_az), eff, grids["el_pts"])
+
+peak = float(max(np.max(p_az_t), 1e-30))
+db_az_t = tuple(to_db(p_az_t, peak, -dyn_range).tolist())
+db_el_t = tuple(to_db(p_el_t, peak, -dyn_range).tolist())
+
+# Null diagnostics
+null_depths = []
+null_az_err = []
+for naz, nel in null_t:
+    a_n = steering_vec(pos_t, naz, nel, wl)
+    el_r = np.radians(90 - nel)
+    pn = (np.abs(np.dot(w.conj(), a_n)) * max(np.cos(el_r), 0.0) ** 1.5 * np.sqrt(eff)) ** 2
+    d = float(to_db(np.array([pn]), peak, -dyn_range)[0])
+    null_depths.append(d)
+
+    idx = int(np.argmin(np.abs(np.array(az_t) - naz)))
+    null_az_err.append(float(db_az_t[idx] - d))
+
+a_des = steering_vec(pos_t, float(steer_az), float(steer_el), wl)
+el_des_r = np.radians(90 - float(steer_el))
+p_des = (np.abs(np.dot(w.conj(), a_des)) * max(np.cos(el_des_r), 0.0) ** 1.5 * np.sqrt(eff)) ** 2
+gain_des = float(to_db(np.array([p_des]), peak, -dyn_range)[0])
+
+peak_gain_dbi = (
+    10 * np.log10(n_total)
+    + 10 * np.log10(max(0.01 * patch_eff * 4 * math.pi * 0.25, 1e-10))
+    + 5.0
+)
+
+bw3 = beamwidth_3db(az_t, db_az_t)
+sll = sidelobe_level(db_az_t)
+
+# -----------------------------------------------------------------------------
+# TOP METRICS
+# -----------------------------------------------------------------------------
+st.markdown("---")
+metric_items = [
+    ("Frequency", f"{freq_mhz:.2f} MHz"),
+    ("Wavelength", f"{wl * 100:.2f} cm"),
+    ("Total Elements", str(n_total)),
+    ("Array Diameter", f"{2 * radius * 100:.2f} cm"),
+    ("Est. Peak Gain", f"{peak_gain_dbi:.1f} dBi"),
+    ("Gain @ Desired", f"{gain_des:.1f} dB rel."),
+    ("3 dB BW", f"{bw3:.1f}°"),
+    ("Max Sidelobe", f"{sll:.1f} dB"),
+]
+
+for row_start in [0, 4]:
+    cols = st.columns(4)
+    for c, (lbl, val) in zip(cols, metric_items[row_start:row_start + 4]):
+        c.markdown(
+            f'<div class="metric-box"><div class="metric-val">{val}</div><div class="metric-lbl">{lbl}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+# Solver health
+colh1, colh2, colh3 = st.columns(3)
+health = "✅ Stable"
+if cond_num > 1e8:
+    health = "❌ Ill-conditioned"
+elif cond_num > 1e6:
+    health = "⚠️ Marginal"
+
+colh1.info(f"**Constraint Matrix Cond. #**: `{{cond_num:.2e}}`")
+colh2.info(f"**Loading ε Used**: `{{eps_used:.1e}}`")
+colh3.info(f"**Null Residual ‖Aᴴw‖₂**: `{{residual:.2e}}` · {{health}}")
+
+if cond_num > 1e8:
+    st.warning(
+        "Constraint matrix is highly ill-conditioned. Consider fewer nulls, larger spacing, or higher loading ε."
+    )
+
+# -----------------------------------------------------------------------------
+# FIGURE BUILDERS
+# -----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def _fig_polar(az_t, db_t, steer_az, null_t, depths_t, dyn):
-    fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(5.2, 5.2))
+def fig_polar(az_t, db_t, steer_az, null_t, depths_t, dyn):
+    fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(5.4, 5.4))
     _fig_dark(fig)
     ax.set_facecolor(PANEL_BG)
-    th = np.radians(az_t)
-    r  = np.clip(np.array(db_t) + dyn, 0, None)
-    ax.plot(th, r, color=PAT_COL, lw=1.8)
-    ax.fill(th, r, color=PAT_COL, alpha=0.12)
+    th = np.radians(np.array(az_t))
+    rr = np.clip(np.array(db_t) + dyn, 0, None)
+    ax.plot(th, rr, color=PAT_COL, lw=1.8)
+    ax.fill(th, rr, color=PAT_COL, alpha=0.14)
     ax.axvline(np.radians(steer_az), color=DES_COL, lw=2, ls="--")
-    for i, ((naz, _), d) in enumerate(zip(null_t, depths_t)):
+    for i, ((naz, _), _) in enumerate(zip(null_t, depths_t)):
         ax.axvline(np.radians(naz), color=NULL_COLS[i % 4], lw=1.8, ls=":")
+
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
     ticks = np.linspace(0, dyn, 5)
     ax.set_yticks(ticks)
-    ax.set_yticklabels([f"{int(t - dyn)}dB" for t in ticks], color="white", fontsize=7)
+    ax.set_yticklabels([f"{{int(t - dyn)}} dB" for t in ticks], color="white", fontsize=7)
     ax.tick_params(colors="white")
     ax.grid(color=GRID_COL, alpha=0.5)
-    ax.set_title("Azimuth Cut  (El = 90°)", color="white", pad=12, fontsize=11)
+    ax.set_title("Azimuth Cut (El = 90°)", color="white", pad=12, fontsize=11)
     fig.tight_layout()
     return fig
 
-
 @st.cache_data(show_spinner=False)
-def _fig_cart(az_t, db_t, steer_az, null_t, depths_t, dyn):
-    fig, ax = plt.subplots(figsize=(5.8, 4.4))
+def fig_cart(az_t, db_t, steer_az, null_t, depths_t, dyn):
+    fig, ax = plt.subplots(figsize=(5.9, 4.4))
     _fig_dark(fig)
     _ax_dark(ax)
-    azs = np.array(az_t)
-    dbs = np.array(db_t)
-    ax.plot(azs, dbs, color=PAT_COL, lw=1.8, label="Pattern")
-    ax.axvline(steer_az, color=DES_COL, lw=2, ls="--", label=f"Desired {steer_az}°")
-    for i, ((naz, nel), d) in enumerate(zip(null_t, depths_t)):
+
+    az = np.array(az_t)
+    db = np.array(db_t)
+    ax.plot(az, db, color=PAT_COL, lw=1.8, label="Pattern")
+    ax.axvline(steer_az, color=DES_COL, lw=2, ls="--", label=f"Desired {{steer_az:.0f}}°")
+
+    for i, ((naz, _), d) in enumerate(zip(null_t, depths_t)):
         c = NULL_COLS[i % 4]
-        ax.axvline(naz, color=c, lw=1.8, ls=":", label=f"N{i+1} Az={naz}° [{d:.1f}dB]")
-        idx = int(np.argmin(np.abs(azs - naz)))
-        ax.annotate(f"N{i+1}\n{d:.0f}dB", xy=(naz, dbs[idx]),
-                    xytext=(naz + 10, -dyn * 0.55), color=c, fontsize=7.5,
-                    arrowprops=dict(arrowstyle="->", color=c, lw=1.1))
+        ax.axvline(naz, color=c, lw=1.8, ls=":", label=f"N{{i+1}} {{naz:.0f}}° ({d:.1f} dB)")
+
     ax.set_ylim([-dyn - 2, 3])
     ax.set_xlim([-180, 180])
     ax.set_xlabel("Azimuth (°)", color="white", fontsize=9)
-    ax.set_ylabel("Rel. Gain (dB)", color="white", fontsize=9)
+    ax.set_ylabel("Relative Gain (dB)", color="white", fontsize=9)
     ax.set_title("Azimuth Pattern (Cartesian)", color="white", fontsize=11)
-    ax.legend(fontsize=7.5, facecolor=PANEL_BG, labelcolor="white", framealpha=0.85)
+    ax.legend(fontsize=7.3, facecolor=PANEL_BG, labelcolor="white", framealpha=0.85)
     fig.tight_layout()
     return fig
 
-
 @st.cache_data(show_spinner=False)
-def _fig_el(el_t, db_t, steer_az, steer_el, null_t, dyn):
-    fig, ax = plt.subplots(figsize=(11.5, 3.8))
+def fig_el(el_t, db_t, steer_az, steer_el, null_t, dyn):
+    fig, ax = plt.subplots(figsize=(11.6, 3.8))
     _fig_dark(fig)
     _ax_dark(ax)
     ax.plot(np.array(el_t), np.array(db_t), color="#f39c12", lw=1.8, label="Pattern")
-    ax.axvline(steer_el, color=DES_COL, lw=2, ls="--", label=f"Desired El={steer_el}°")
+    ax.axvline(steer_el, color=DES_COL, lw=2, ls="--", label=f"Desired El={{steer_el:.0f}}°")
+
     for i, (naz, nel) in enumerate(null_t):
-        if abs(naz - steer_az) < 15:
-            ax.axvline(nel, color=NULL_COLS[i % 4], lw=1.8, ls=":", label=f"N{i+1} El={nel}°")
+        if abs(naz - steer_az) < 20:
+            ax.axvline(nel, color=NULL_COLS[i % 4], lw=1.8, ls=":", label=f"N{{i+1}} El={{nel:.0f}}°")
+
     ax.set_ylim([-dyn - 2, 3])
     ax.set_xlim([0, 90])
     ax.set_xlabel("Elevation (°)", color="white", fontsize=9)
-    ax.set_ylabel("Rel. Gain (dB)", color="white", fontsize=9)
-    ax.set_title(f"Elevation Pattern  (Az = {steer_az}°)", color="white", fontsize=11)
+    ax.set_ylabel("Relative Gain (dB)", color="white", fontsize=9)
+    ax.set_title(f"Elevation Pattern (Az = {{steer_az:.0f}}°)", color="white", fontsize=11)
     ax.legend(fontsize=8, facecolor=PANEL_BG, labelcolor="white", framealpha=0.85)
     fig.tight_layout()
     return fig
 
-
 @st.cache_data(show_spinner=False)
-def _fig_layout(pos_t, wl, steer_az, null_t, wm_t, wp_t, max_w, radius):
-    pos    = np.array(pos_t)
+def fig_layout(pos_t, wl, steer_az, null_t, wm_t, wp_t, max_w):
+    pos = np.array(pos_t)
     pos_cm = pos * 100
-    wl_cm  = wl * 100
-    patch  = 0.5 * wl_cm * 0.85
-    cmap   = plt.cm.plasma
-    fig, ax = plt.subplots(figsize=(5.2, 5.2))
+    patch = 0.5 * (wl * 100) * 0.85
+
+    fig, ax = plt.subplots(figsize=(5.3, 5.3))
     _fig_dark(fig)
     ax.set_facecolor(PANEL_BG)
     ax.set_aspect("equal")
-    for i, (xi, yi, _) in enumerate(pos_cm):
+
+    cmap = plt.cm.plasma
+    for i, (x, y, _) in enumerate(pos_cm):
         col = cmap(wm_t[i] / max_w)
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (xi - patch / 2, yi - patch / 2), patch, patch,
-            boxstyle="round,pad=0.05", lw=1.4, edgecolor="white", facecolor=col, alpha=0.9))
-        ax.text(xi, yi, f"{wp_t[i]:.0f}°", ha="center", va="center",
-                fontsize=6, color="white", fontweight="bold")
-    R = max(np.max(np.abs(pos_cm[:, 0])), 2) * 2.4
+        ax.add_patch(
+            mpatches.FancyBboxPatch(
+                (x - patch / 2, y - patch / 2), patch, patch,
+                boxstyle="round,pad=0.05", lw=1.2, edgecolor="white", facecolor=col, alpha=0.9
+            )
+        )
+        ax.text(x, y, f"{{wp_t[i]:.0f}}°", ha="center", va="center", color="white", fontsize=6, fontweight="bold")
+
+    r = max(np.max(np.abs(pos_cm[:, :2])), 2) * 2.4
+
     dr = np.radians(steer_az)
-    ax.annotate("", xy=(R * np.sin(dr), R * np.cos(dr)), xytext=(0, 0),
-                arrowprops=dict(arrowstyle="-|>", color=DES_COL, lw=2.2, mutation_scale=14))
-    ax.text(R * 1.12 * np.sin(dr), R * 1.12 * np.cos(dr), "Des.",
-            color=DES_COL, fontsize=8, ha="center", va="center", fontweight="bold")
+    ax.annotate("", xy=(r * np.sin(dr), r * np.cos(dr)), xytext=(0, 0),
+                arrowprops=dict(arrowstyle="-|>", color=DES_COL, lw=2.1, mutation_scale=14))
+    ax.text(r * 1.12 * np.sin(dr), r * 1.12 * np.cos(dr), "Des.", color=DES_COL, fontsize=8, fontweight="bold")
+
     for i, (naz, _) in enumerate(null_t):
-        c  = NULL_COLS[i % 4]
+        c = NULL_COLS[i % 4]
         nr = np.radians(naz)
-        ax.annotate("", xy=(R * np.sin(nr), R * np.cos(nr)), xytext=(0, 0),
-                    arrowprops=dict(arrowstyle="-|>", color=c, lw=1.8, mutation_scale=12))
-        ax.text(R * 1.12 * np.sin(nr), R * 1.12 * np.cos(nr), f"N{i+1}",
-                color=c, fontsize=8, ha="center", va="center", fontweight="bold")
-    lim = R * 1.35
+        ax.annotate("", xy=(r * np.sin(nr), r * np.cos(nr)), xytext=(0, 0),
+                    arrowprops=dict(arrowstyle="-|>", color=c, lw=1.7, mutation_scale=12))
+        ax.text(r * 1.12 * np.sin(nr), r * 1.12 * np.cos(nr), f"N{{i+1}}", color=c, fontsize=8, fontweight="bold")
+
+    lim = r * 1.35
     ax.set_xlim([-lim, lim])
     ax.set_ylim([-lim, lim])
     ax.set_xlabel("x (cm)", color="white", fontsize=9)
     ax.set_ylabel("y (cm)", color="white", fontsize=9)
-    ax.set_title("Element Layout\n(color=|w|, text=phase°)", color="white", fontsize=10)
+    ax.set_title("Element Layout (color=|w|, text=phase°)", color="white", fontsize=10)
     ax.tick_params(colors="white")
     for sp in ax.spines.values():
         sp.set_edgecolor("#444")
     ax.grid(color=GRID_COL, alpha=0.3, ls="--")
+
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
     cb = fig.colorbar(sm, ax=ax, fraction=0.04, pad=0.04)
     cb.set_label("Norm. |w|", color="white", fontsize=8)
     cb.ax.yaxis.set_tick_params(color="white")
     plt.setp(cb.ax.yaxis.get_ticklabels(), color="white")
+
     fig.tight_layout()
     return fig
 
-
 @st.cache_data(show_spinner=False)
-def _fig_phasors(wr_t, wi_t, max_w, N_total):
-    w      = np.array(wr_t) + 1j * np.array(wi_t)
-    mags   = np.abs(w)
-    phases = np.angle(w, deg=True)
-    fig, ax = plt.subplots(figsize=(5.2, 5.2))
+def fig_phasors(wr_t, wi_t, max_w, n_total):
+    w = np.array(wr_t) + 1j * np.array(wi_t)
+    mags = np.abs(w)
+    phs = np.angle(w, deg=True)
+
+    fig, ax = plt.subplots(figsize=(5.3, 5.3))
     _fig_dark(fig)
     ax.set_facecolor(PANEL_BG)
+
     th = np.linspace(0, 2 * np.pi, 300)
     ax.plot(np.cos(th), np.sin(th), color="#444", lw=1)
     ax.axhline(0, color="#444", lw=0.5)
     ax.axvline(0, color="#444", lw=0.5)
-    colors_e = plt.cm.cool(np.linspace(0, 1, N_total))
+
+    colors_e = plt.cm.cool(np.linspace(0, 1, n_total))
     for i, wi in enumerate(w):
         wn = wi / max_w
         ax.quiver(0, 0, wn.real, wn.imag, angles="xy", scale_units="xy", scale=1,
-                  color=colors_e[i], alpha=0.85, width=0.013)
-        ax.scatter(wn.real, wn.imag, color=colors_e[i], s=55, zorder=5)
-        ax.text(wn.real * 1.1, wn.imag * 1.1, str(i),
-                color=colors_e[i], fontsize=8, ha="center")
+                  color=colors_e[i], alpha=0.9, width=0.012)
+        ax.scatter(wn.real, wn.imag, color=colors_e[i], s=52, zorder=5)
+        ax.text(wn.real * 1.09, wn.imag * 1.09, str(i), color=colors_e[i], fontsize=8, ha="center")
+
     ax.set_xlim([-1.4, 1.4])
     ax.set_ylim([-1.4, 1.4])
     ax.set_aspect("equal")
     ax.set_xlabel("Real", color="white", fontsize=9)
     ax.set_ylabel("Imaginary", color="white", fontsize=9)
-    ax.set_title("Weight Phasors (normalised)", color="white", fontsize=10)
+    ax.set_title("Weight Phasors (normalized)", color="white", fontsize=10)
     ax.tick_params(colors="white")
     for sp in ax.spines.values():
         sp.set_edgecolor("#444")
     ax.grid(color=GRID_COL, alpha=0.3, ls="--")
-    if N_total <= 10:
-        patches = [mpatches.Patch(color=plt.cm.cool(i / (max(N_total - 1, 1))),
-                                  label=f"E{i}  |w|={mags[i]/max_w:.2f} ∠{phases[i]:.0f}°")
-                   for i in range(N_total)]
-        ax.legend(handles=patches, fontsize=6.5, facecolor=PANEL_BG,
-                  labelcolor="white", framealpha=0.85, loc="lower right")
+
+    if n_total <= 12:
+        patches = [
+            mpatches.Patch(color=plt.cm.cool(i / max(n_total - 1, 1)),
+                           label=f"E{{i}}: |w|={{mags[i]/max_w:.2f}} ∠{{phs[i]:.0f}}°")
+            for i in range(n_total)
+        ]
+        ax.legend(handles=patches, fontsize=6.3, facecolor=PANEL_BG, labelcolor="white", framealpha=0.85, loc="lower right")
+
     fig.tight_layout()
     return fig
 
-
 @st.cache_data(show_spinner=False)
-def _fig_3d(pos_t, wr_t, wi_t, wl, eff, dyn):
-    az_t, el_t, pow_t = compute_3d_pattern(pos_t, wr_t, wi_t, wl, eff)
-    POW  = np.array(pow_t)
-    peak = max(np.max(POW), 1e-30)
-    DB   = to_db(POW, peak, -dyn)
-    R    = np.clip(DB + dyn, 0, None) / dyn
+def fig_3d(pos_t, wr_t, wi_t, wl, eff, dyn, n_az, n_el):
+    az_t, el_t, pwr_t = compute_3d_pattern(pos_t, wr_t, wi_t, wl, eff, n_az, n_el)
+    pwr = np.array(pwr_t)
+    peak_local = max(np.max(pwr), 1e-30)
+    db = to_db(pwr, peak_local, -dyn)
+    R = np.clip(db + dyn, 0, None) / dyn
+
     az_v = np.array(az_t)
     el_v = np.array(el_t)
-    AZ_r = np.radians(np.meshgrid(az_v, el_v)[0])
-    EL_r = np.radians(np.meshgrid(az_v, el_v)[1])
+    AZ_r, EL_r = np.radians(np.meshgrid(az_v, el_v))
+
     X = R * np.cos(EL_r) * np.sin(AZ_r)
     Y = R * np.cos(EL_r) * np.cos(AZ_r)
     Z = R * np.sin(EL_r)
-    fig = plt.figure(figsize=(7.5, 5.5))
+
+    fig = plt.figure(figsize=(7.7, 5.6))
     _fig_dark(fig)
     ax = fig.add_subplot(111, projection="3d")
     ax.set_facecolor(PANEL_BG)
-    ax.plot_surface(X, Y, Z, facecolors=plt.cm.plasma(R),
-                    alpha=0.85, linewidth=0, antialiased=True)
+    ax.plot_surface(X, Y, Z, facecolors=plt.cm.plasma(R), alpha=0.85, linewidth=0, antialiased=True)
     ax.set_title("3D Pattern (upper hemisphere)", color="white", fontsize=11)
     ax.tick_params(colors="white", labelsize=7)
+
     for p in [ax.xaxis, ax.yaxis, ax.zaxis]:
         p.pane.fill = False
         p.pane.set_edgecolor("#333")
+
     fig.tight_layout()
     return fig
 
-
-# ──────────────────────────────────────────────────────
-# COMPUTE
-# ──────────────────────────────────────────────────────
-pos_t, wl, radius = build_array(int(N_elem), spacing_frac, freq_mhz)
-null_t  = tuple(null_dirs)
-N_total = len(pos_t)
-eff     = patch_eff / 100.0
-
-wr_t, wi_t = compute_weights(pos_t, wl, steer_az, steer_el, null_t)
-w = np.array(wr_t) + 1j * np.array(wi_t)
-
-weight_mags   = tuple(np.abs(w).tolist())
-weight_phases = tuple(np.angle(w, deg=True).tolist())
-max_w = max(max(weight_mags), 1e-30)
-
-az_t, pow_az_t = compute_az_pattern(pos_t, wr_t, wi_t, wl, eff)
-el_t, pow_el_t = compute_el_pattern(pos_t, wr_t, wi_t, wl, steer_az, eff)
-
-peak    = max(max(pow_az_t), 1e-30)
-db_az_t = tuple(to_db(pow_az_t, peak, -dyn_range).tolist())
-db_el_t = tuple(to_db(pow_el_t, peak, -dyn_range).tolist())
-
-# Null depths
-null_depths = []
-for naz, nel in null_dirs:
-    a_n  = _sv(pos_t, naz, nel, wl)
-    el_r = np.radians(90 - nel)
-    pn   = (np.abs(np.dot(w.conj(), a_n)) * max(np.cos(el_r), 0)**1.5 * np.sqrt(eff))**2
-    null_depths.append(float(to_db(np.array([pn]), peak, -dyn_range)[0]))
-
-a_des    = _sv(pos_t, steer_az, steer_el, wl)
-el_des_r = np.radians(90 - steer_el)
-p_des    = (np.abs(np.dot(w.conj(), a_des)) * max(np.cos(el_des_r), 0)**1.5 * np.sqrt(eff))**2
-gain_des = float(to_db(np.array([p_des]), peak, -dyn_range)[0])
-
-peak_gain_dbi = (10 * np.log10(N_total)
-                 + 10 * np.log10(max(0.01 * patch_eff * 4 * math.pi * 0.25, 1e-10))
-                 + 5.0)
-
-# ──────────────────────────────────────────────────────
-# METRICS
-# ──────────────────────────────────────────────────────
-st.markdown("---")
-mcols = st.columns(6)
-for col, (lbl, val) in zip(mcols, [
-    ("Frequency",      f"{freq_mhz:.2f} MHz"),
-    ("Wavelength",     f"{wl * 100:.2f} cm"),
-    ("Total Elements", str(N_total)),
-    ("Array Diameter", f"{2 * radius * 100:.2f} cm"),
-    ("Est. Peak Gain", f"{peak_gain_dbi:.1f} dBi"),
-    ("Gain @ Desired", f"{gain_des:.1f} dB rel."),
-]):
-    col.markdown(
-        f'<div class="metric-box"><div class="metric-val">{val}</div>'
-        f'<div class="metric-lbl">{lbl}</div></div>',
-        unsafe_allow_html=True
-    )
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ──────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PLOTS
-# ──────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+st.markdown("---")
 depths_t = tuple(null_depths)
-wm_t     = weight_mags
-wp_t     = weight_phases
+wm_t = tuple(wm.tolist())
+wp_t = tuple(wp.tolist())
 
-col1, col2 = st.columns(2)
-with col1:
+c1, c2 = st.columns(2)
+with c1:
     st.subheader("Azimuth Pattern — Polar")
-    f = _fig_polar(az_t, db_az_t, steer_az, null_t, depths_t, dyn_range)
-    st.pyplot(f, use_container_width=True)
-    plt.close(f)
+    f1 = fig_polar(az_t, db_az_t, float(steer_az), null_t, depths_t, int(dyn_range))
+    st.pyplot(f1, use_container_width=True)
 
-with col2:
+with c2:
     st.subheader("Azimuth Pattern — Cartesian")
-    f = _fig_cart(az_t, db_az_t, steer_az, null_t, depths_t, dyn_range)
-    st.pyplot(f, use_container_width=True)
-    plt.close(f)
+    f2 = fig_cart(az_t, db_az_t, float(steer_az), null_t, depths_t, int(dyn_range))
+    st.pyplot(f2, use_container_width=True)
 
-st.subheader(f"Elevation Pattern  (Az = {steer_az}°)")
-f = _fig_el(el_t, db_el_t, steer_az, steer_el, null_t, dyn_range)
-st.pyplot(f, use_container_width=True)
-plt.close(f)
+st.subheader(f"Elevation Pattern (Az = {{steer_az:.0f}}°)")
+f3 = fig_el(el_t, db_el_t, float(steer_az), float(steer_el), null_t, int(dyn_range))
+st.pyplot(f3, use_container_width=True)
 
-col3, col4 = st.columns(2)
-with col3:
+c3, c4 = st.columns(2)
+with c3:
     st.subheader("Array Element Layout")
-    f = _fig_layout(pos_t, wl, steer_az, null_t, wm_t, wp_t, max_w, radius)
-    st.pyplot(f, use_container_width=True)
-    plt.close(f)
+    f4 = fig_layout(pos_t, wl, float(steer_az), null_t, wm_t, wp_t, max_w)
+    st.pyplot(f4, use_container_width=True)
 
-with col4:
+with c4:
     st.subheader("Weight Phasors")
-    f = _fig_phasors(wr_t, wi_t, max_w, N_total)
-    st.pyplot(f, use_container_width=True)
-    plt.close(f)
+    f5 = fig_phasors(wr_t, wi_t, max_w, n_total)
+    st.pyplot(f5, use_container_width=True)
 
 if show_3d:
     st.subheader("3D Radiation Pattern")
     with st.spinner("Rendering 3D…"):
-        f = _fig_3d(pos_t, wr_t, wi_t, wl, eff, dyn_range)
-        st.pyplot(f, use_container_width=True)
-        plt.close(f)
+        f6 = fig_3d(
+            pos_t, wr_t, wi_t, wl, eff, int(dyn_range),
+            grids["n_az_3d"], grids["n_el_3d"]
+        )
+        st.pyplot(f6, use_container_width=True)
 
-# ──────────────────────────────────────────────────────
-# TABLES
-# ──────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TABLES + DOWNLOADS
+# -----------------------------------------------------------------------------
 st.markdown("---")
-tc1, tc2 = st.columns(2)
+t1, t2 = st.columns(2)
 
-with tc1:
+with t1:
     st.subheader("🎯 Null Summary")
-    if n_nulls:
-        st.dataframe(pd.DataFrame([{
-            "Null": i + 1,
-            "Az (°)": naz,
-            "El (°)": nel,
-            "Depth (dB)": f"{d:.1f}",
-            "Status": ("✅ Deep" if d < -20 else ("⚠️ Shallow" if d < -10 else "❌ Weak"))
-        } for i, ((naz, nel), d) in enumerate(zip(null_dirs, null_depths))]),
-        use_container_width=True, hide_index=True)
+    if len(null_t) > 0:
+        df_null = pd.DataFrame([
+            {
+                "Null": i + 1,
+                "Az (°)": naz,
+                "El (°)": nel,
+                "Depth (dB)": f"{{d:.1f}}",
+                "Status": "✅ Deep" if d < -20 else ("⚠️ Shallow" if d < -10 else "❌ Weak"),
+            }
+            for i, ((naz, nel), d) in enumerate(zip(null_t, null_depths))
+        ])
+        st.dataframe(df_null, use_container_width=True, hide_index=True)
     else:
         st.info("No nulls configured.")
 
-with tc2:
+with t2:
     st.subheader("⚖️ Element Weights")
     pos_arr = np.array(pos_t)
-    st.dataframe(pd.DataFrame({
-        "Elem":      [f"E{i}{'★' if i == 0 else ''}" for i in range(N_total)],
-        "x (cm)":    [f"{pos_arr[i, 0] * 100:.2f}" for i in range(N_total)],
-        "y (cm)":    [f"{pos_arr[i, 1] * 100:.2f}" for i in range(N_total)],
-        "|w| norm":  [f"{wm_t[i] / max_w:.3f}" for i in range(N_total)],
-        "Phase (°)": [f"{wp_t[i]:.1f}" for i in range(N_total)],
-    }), use_container_width=True, hide_index=True)
+    df_w = pd.DataFrame(
+        {
+            "Elem": [f"E{i}{'*' if i == 0 else ''}" for i in range(n_total)],
+            "x (cm)": [f"{{pos_arr[i, 0] * 100:.2f}}" for i in range(n_total)],
+            "y (cm)": [f"{{pos_arr[i, 1] * 100:.2f}}" for i in range(n_total)],
+            "|w| norm": [f"{{wm_t[i] / max_w:.3f}}" for i in range(n_total)],
+            "Phase (°)": [f"{{wp_t[i]:.1f}}" for i in range(n_total)],
+            "w_real": [float(np.real(w[i])) for i in range(n_total)],
+            "w_imag": [float(np.imag(w[i])) for i in range(n_total)],
+        }
+    )
+    st.dataframe(df_w, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.subheader("📦 Export")
+e1, e2, e3 = st.columns(3)
+
+weights_csv = df_w.to_csv(index=False).encode("utf-8")
+scenario_obj = Scenario(
+    name="Exported Scenario",
+    freq_mhz=float(freq_mhz),
+    n_outer=int(n_outer),
+    spacing_frac=float(spacing_frac),
+    steer_az=float(steer_az),
+    steer_el=float(steer_el),
+    patch_eff_pct=int(patch_eff),
+    dyn_range_db=int(dyn_range),
+    nulls=list(map(tuple, null_t)),
+    quality_mode=quality_mode,
+    show_3d=bool(show_3d),
+)
+scenario_json = json.dumps(asdict(scenario_obj), indent=2).encode("utf-8")
+
+with e1:
+    st.download_button("Download Weights CSV", data=weights_csv, file_name="crpa_weights.csv", mime="text/csv")
+with e2:
+    st.download_button("Download Scenario JSON", data=scenario_json, file_name="crpa_scenario.json", mime="application/json")
+with e3:
+    st.caption("Use CSV for DSP chain integration and JSON for reproducible testing.")
 
 st.markdown("---")
 st.caption(
-    "**Method:** Projection-matrix null steering — "
-    "**w = P·a_d**  where  **P = I − Aₙ(AₙᴴAₙ)⁻¹Aₙᴴ**. "
-    "Element pattern: cos¹·⁵(θ) (square microstrip patch). ★ = centre element."
+    "**Method:** Projection null steering with diagonal loading. "
+    "Weights: **w = P·a_d**,  **P = I − A(AᴴA + εI)⁻¹Aᴴ**. "
+    "Element model: cos¹·⁵(θ), square patch approximation. ★ = center element."
 )
